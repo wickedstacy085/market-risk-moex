@@ -1,0 +1,223 @@
+---
+title: "Рыночный риск: VaR и ES по индексу Мосбиржи"
+description: "Однодневный VaR 99% и ES 97,5% по индексу IMOEX четырьмя методами (историческая симуляция, нормальный, EWMA, filtered historical simulation) с бэктестом Купика, Кристофферсена и светофором Базеля на 2014–2026 годах; ставка RUONIA как процесс Орнштейна–Уленбека."
+author: Анастасия Смирнова
+date: 2026-11-22
+execute:
+  echo: true
+  warning: false
+---
+
+::: {.case-meta}
+Проект, 2026 · Python ·
+[Код](https://github.com/wickedstacy085/market-risk-moex/tree/main/src/risk) ·
+[Тесты](https://github.com/wickedstacy085/market-risk-moex/tree/main/tests) ·
+[Данные](https://github.com/wickedstacy085/market-risk-moex/blob/main/data/README.md)
+:::
+
+```{python}
+#| label: setup
+#| include: false
+import sys
+sys.path.insert(0, "src")
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from risk.data import load_index, load_ruonia
+from risk.var import rolling_var
+from risk.backtest import backtest_table, zones_by_year, exceptions
+from risk.ou import fit_ou, simulate_ou
+
+plt.rcParams.update({"figure.dpi": 110, "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": True, "grid.alpha": .3, "font.size": 10})
+
+r = load_index("data/imoex.csv")
+METHODS = {"hist": "Историческая симуляция", "normal": "Нормальный", "ewma": "EWMA (RiskMetrics)",
+           "fhs": "Filtered historical simulation"}
+var = {m: rolling_var(r, m) for m in METHODS}
+bt = pd.DataFrame({m: backtest_table(r, var[m]) for m in METHODS}).T
+zones = pd.DataFrame({m: zones_by_year(r, var[m])["exceptions"] for m in METHODS})
+start = var["hist"]["var"].first_valid_index()
+POSITION = 1_000_000
+last = r.index[-1]
+
+crash = pd.Timestamp("2022-02-24")
+crash_var = {m: var[m].loc[crash, "var"] for m in METHODS}
+crash_simple = 100 * (np.exp(r.loc[crash] / 100) - 1)
+
+x = load_ruonia("data/ruonia.csv")
+REGIMES = {"2014–2026, весь период": ("2014", "2026"), "07.2017–01.2022": ("2017-07", "2022-01"),
+           "2023–2026": ("2023", "2026")}
+ou = {k: fit_ou(x[a:b]) for k, (a, b) in REGIMES.items()}
+recent = ou["2023–2026"]
+
+def fmt(v, d=2):
+    return f"{v:,.{d}f}".replace(",", " ").replace(".", ",").replace("-", "−")
+
+def pval(p):
+    return "< 0,001" if p < 0.001 else fmt(p, 3)
+
+e_f = exceptions(r, var["fhs"]); h_f = e_f[e_f == 1].index.drop(crash, errors="ignore")
+loss_wo, es_wo = -r[h_f].mean(), var["fhs"].loc[h_f, "es"].mean()
+passed = [m for m in METHODS if bt.loc[m, "kupiec_p"] > 0.05 and bt.loc[m, "christoffersen_p"] > 0.05]
+```
+
+::: {.result-box}
+**Аннотация.** Сколько можно потерять за день на позиции в индексе Мосбиржи — и какому методу расчёта VaR
+можно верить? Я посчитала скользящий однодневный VaR 99% и ES 97,5% по IMOEX четырьмя методами за
+`{python} start.year`–`{python} last.year` годы (`{python} fmt(bt.iloc[0]["n"], 0)` торговых дней) и проверила их
+бэктестом. **Тесты Купика и Кристофферсена проходит только filtered historical simulation**: `{python} fmt(bt.loc["fhs", "exceptions"], 0)`
+пробоев при ожидаемых `{python} fmt(bt.loc["fhs", "expected"], 0)`. Историческая симуляция и нормальный VaR пробиваются
+почти вдвое чаще нормы, причём пробои идут кластерами. 24 февраля 2022 года индекс упал на
+`{python} fmt(-crash_simple, 0)`% — ни один метод не давал больше `{python} fmt(max(crash_var.values()), 0)`%.
+:::
+
+## Вопрос и данные
+
+VaR 99% — потеря, которую позиция превысит в среднем в 1 дне из 100; ES 97,5% — средняя потеря в худших 2,5%
+дней (мера, на которую перешёл Базель в FRTB). Данные — цена закрытия индекса МосБиржи (IMOEX) с января 2013 года
+из ISS API биржи. Доходности логарифмические, в процентах; окно оценки — 250 торговых дней; прогноз на день
+*t* строится только по данным до *t−1*. Торги акциями не проводились с 25 февраля по 23 марта 2022 года, поэтому
+доходность 24 марта охватывает весь разрыв.
+
+## Методы
+
+| Метод | Как считается | Что предполагает |
+|---|---|---|
+| Историческая симуляция | 1%-й квантиль доходностей за 250 дней | будущее похоже на последний год |
+| Нормальный | $-\mu + 2{,}326\,\sigma$ по 250 дням | нормальные доходности, постоянная волатильность |
+| EWMA (RiskMetrics) | $2{,}326\,\sigma_t$, $\sigma^2_t = 0{,}94\,\sigma^2_{t-1} + 0{,}06\,r^2_{t-1}$ | нормальные доходности, волатильность меняется |
+| Filtered historical simulation | квантиль стандартизованных остатков $r_s/\sigma_s$ × текущая $\sigma_t$ | хвосты — исторические, волатильность — текущая |
+
+```{python}
+#| label: fig-var
+#| fig-cap: "Дневные доходности IMOEX и прогноз VaR 99% двумя методами (потери отложены вниз); точки — пробои FHS"
+fig, ax = plt.subplots(figsize=(10, 4))
+rr = r[start:]
+ax.bar(rr.index, rr.clip(lower=-15), width=1.5, color="#9aa5b1", label="доходность, %")
+ax.plot(var["hist"]["var"][start:] * -1, color="#c44e52", lw=1, label="VaR, историческая симуляция")
+ax.plot(var["fhs"]["var"][start:].clip(upper=15) * -1, color="#4c72b0", lw=1, label="VaR, FHS")
+e = exceptions(r, var["fhs"]); hits = e[e == 1].index
+ax.scatter(hits, r[hits].clip(lower=-15), s=10, color="black", zorder=3, label="пробой FHS")
+ax.set_ylim(-15.5, 10); ax.set_ylabel("%")
+ax.legend(fontsize=8, loc="lower left", ncol=2)
+plt.tight_layout()
+```
+
+Шкала обрезана на −15%: 24.02.2022 (−40% в лог-доходности) и рост на 18% на следующий день не помещаются.
+
+## Бэктест
+
+```{python}
+#| label: tbl-backtest
+#| tbl-cap: "Бэктест VaR 99%: число пробоев и тесты (p-value > 0,05 — модель не отвергается)"
+pd.DataFrame({
+    "Метод": [METHODS[m] for m in bt.index],
+    "Пробоев": bt["exceptions"].map(lambda v: fmt(v, 0)),
+    "Ожидалось": bt["expected"].map(lambda v: fmt(v, 0)),
+    "Доля": (bt["rate"] * 100).map(lambda v: fmt(v, 2) + "%"),
+    "Купик, p": bt["kupiec_p"].map(pval),
+    "Кристофферсен, p": bt["christoffersen_p"].map(pval),
+}).style.hide(axis="index")
+```
+
+- **Тест Купика** проверяет, совпадает ли доля пробоев с 1%. Его не проходят три метода из четырёх: они
+  систематически занижают риск.
+- **Тест Кристофферсена** проверяет, независимы ли пробои: если вчера был пробой, сегодня он не должен быть
+  вероятнее. Историческая симуляция и нормальный VaR его проваливают — они медленно реагируют на рост
+  волатильности, и пробои идут сериями. EWMA и FHS обновляют волатильность каждый день, и кластеры исчезают.
+- **EWMA** реагирует быстро, но предполагает нормальные хвосты, поэтому пробоев всё равно слишком много.
+  **FHS** берёт текущую волатильность из EWMA, а форму хвоста — из истории, и единственный проходит оба теста.
+
+```{python}
+#| label: tbl-zones
+#| tbl-cap: "Пробои VaR 99% по годам и зоны светофора Базельского комитета (0–4 — зелёная, 5–9 — жёлтая, 10+ — красная)"
+def zone_cell(n):
+    mark = "🟢" if n <= 4 else ("🟡" if n <= 9 else "🔴")
+    return f"{mark} {int(n)}"
+z = zones.loc[start.year:].copy()
+z.columns = [METHODS[c] for c in z.columns]
+z.index.name = "Год"
+z.map(zone_cell).reset_index().style.hide(axis="index")
+```
+
+Красная зона — 2020 (пандемия) и 2024 (резкое ужесточение денежно-кредитной политики): у нормального VaR и EWMA
+в оба года, у исторической симуляции — в 2024-м. FHS ни разу не выходит за жёлтую зону.
+
+## 24 февраля 2022 года
+
+```{python}
+#| label: tbl-crash
+#| tbl-cap: "Прогноз VaR 99% на 24.02.2022 и VaR на позицию 1 млн ₽"
+pd.DataFrame({"Метод": [METHODS[m] for m in METHODS],
+              "VaR, %": [fmt(crash_var[m], 1) for m in METHODS],
+              "VaR, ₽": [fmt(crash_var[m] / 100 * POSITION, 0) for m in METHODS]}).style.hide(axis="index")
+```
+
+Фактическая потеря — `{python} fmt(-crash_simple, 1)`%, или `{python} fmt(-crash_simple / 100 * POSITION, 0)` ₽ на
+1 млн. VaR по построению не ловит события, которых не было в окне оценки: это аргумент за стресс-тесты
+и сценарный анализ поверх VaR, а не за «лучший» метод VaR. Обратная сторона FHS видна сразу после шока: волатильность
+в EWMA подскакивает: несколько дней VaR превышает 40%, а выше 20% держится до мая 2022 года — модель становится
+сверхконсервативной, что для банка означает дорогой капитал.
+
+## Expected Shortfall
+
+ES показывает, сколько теряется *за* порогом VaR. В дни пробоев средняя фактическая потеря —
+`{python} fmt(bt.loc["fhs", "avg_loss_on_exc"], 1)`% (FHS) против прогнозного ES `{python} fmt(bt.loc["fhs", "avg_es_on_exc"], 1)`%
+— ES недооценивает хвост. Частично это эффект одного дня, 24.02.2022, но не только: без него средняя потеря при
+пробое `{python} fmt(loss_wo, 1)`% против ES `{python} fmt(es_wo, 1)`%. Хвосты IMOEX тяжелее, чем даже
+историческое окно в 250 дней успевает «увидеть».
+
+## Ставка RUONIA как процесс Орнштейна–Уленбека
+
+Для ставок классическая модель — Васичек, то есть процесс Орнштейна–Уленбека
+$dX_t = \kappa(\theta - X_t)\,dt + \sigma\,dW_t$: ставка возвращается к уровню $\theta$ со скоростью $\kappa$,
+половина отклонения исчезает за $\ln 2/\kappa$. Параметры оцениваются через точную дискретизацию — регрессию
+$X_{t+1} = a + bX_t + \varepsilon$, где $b = e^{-\kappa\Delta t}$, $\theta = a/(1-b)$.
+
+```{python}
+#| label: tbl-ou
+#| tbl-cap: "Оценки модели Васичека для RUONIA по периодам"
+pd.DataFrame({"Период": list(ou),
+              "θ, % годовых": [fmt(v["theta"], 1) for v in ou.values()],
+              "κ": [fmt(v["kappa"], 2) for v in ou.values()],
+              "σ": [fmt(v["sigma"], 2) for v in ou.values()],
+              "Полураспад шока, торговых дней": [fmt(v["half_life_days"], 0) for v in ou.values()]}).style.hide(axis="index")
+```
+
+```{python}
+#| label: fig-ou
+#| fig-cap: "RUONIA и 1 000 сценариев на год вперёд по модели Васичека с параметрами 2023–2026 (полоса 5–95%)"
+t, paths = simulate_ou(x.iloc[-1], recent["kappa"], recent["theta"], recent["sigma"], T=1, n=252, paths=1000, seed=1)
+future = pd.bdate_range(x.index[-1], periods=253)
+fig, ax = plt.subplots(figsize=(10, 3.6))
+ax.plot(x["2019":], color="#4c72b0", lw=1, label="RUONIA")
+ax.fill_between(future, np.quantile(paths, .05, axis=0), np.quantile(paths, .95, axis=0), color="#4c72b0", alpha=.2,
+                label="сценарии 5–95%")
+ax.plot(future, np.median(paths, axis=0), color="#4c72b0", ls="--", lw=1)
+ax.axhline(recent["theta"], color="grey", lw=.8, ls=":")
+ax.set_ylabel("% годовых"); ax.legend(fontsize=8, loc="upper left")
+plt.tight_layout()
+```
+
+Главный вывод — про ограничения модели. Уровень $\theta$, к которому «возвращается» ставка, в 2017–2021 годах был
+`{python} fmt(ou["07.2017–01.2022"]["theta"], 1)`%, а в 2023–2026 — `{python} fmt(recent["theta"], 1)`%: его задаёт
+ключевая ставка Банка России, а не рыночная механика. Оценка по всему периоду смешивает режимы и скачки
+(декабрь 2014, февраль 2022) и даёт бессмысленные `{python} fmt(ou["2014–2026, весь период"]["theta"], 1)`% и
+завышенную σ. Для российских ставок модель OU работает только внутри одного режима политики; для стресс-сценариев
+нужны скачки или переключение режимов.
+
+## Ограничения
+
+- Один актив и однодневный горизонт; для портфеля нужны корреляции и пересчёт на 10 дней.
+- Индекс ценовой, без дивидендов; доходность через перерыв торгов 2022 года — одно наблюдение.
+- Сравнение методов зависит от периода: в спокойные годы простые методы тоже в зелёной зоне.
+
+## Код
+
+[`src/risk/`](https://github.com/wickedstacy085/market-risk-moex/tree/main/src/risk): `var.py` (четыре метода
+VaR/ES, EWMA и FHS реализованы вручную), `backtest.py` (Купик, Кристофферсен, светофор), `ou.py`. 22 теста в
+[`tests/`](https://github.com/wickedstacy085/market-risk-moex/tree/main/tests): VaR и ES нормального распределения
+сверены с теорией (2,326 и 2,338), проверено отсутствие заглядывания в будущее, тесты бэктеста — на эталонных
+сериях пробоев, оценка OU восстанавливает параметры на симуляции.

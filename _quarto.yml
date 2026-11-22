@@ -1,0 +1,37 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.qmd
+
+execute:
+  freeze: false
+
+website:
+  title: "Рыночный риск: VaR по IMOEX"
+  site-url: "https://wickedstacy085.github.io/market-risk-moex"
+  repo-url: "https://github.com/wickedstacy085/market-risk-moex"
+  open-graph: true
+  navbar:
+    left:
+      - href: "https://wickedstacy085.github.io/"
+        text: "← Все проекты"
+    right:
+      - icon: github
+        href: "https://github.com/wickedstacy085/market-risk-moex"
+        aria-label: GitHub
+  page-footer:
+    left: "Анастасия Смирнова, 2026 · данные: Московская биржа, Банк России"
+    right: "[Код проекта](https://github.com/wickedstacy085/market-risk-moex)"
+
+format:
+  html:
+    theme:
+      light: [cosmo, assets/custom.scss]
+      dark: [darkly, assets/custom.scss]
+    toc: true
+    code-fold: true
+    code-copy: true
+    fig-width: 8
+    fig-height: 4.5
+    lang: ru
