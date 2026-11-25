@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-try:  # на корпоративных ПК доверенные сертификаты лежат в хранилище ОС, а не в Python
+try:  
     import truststore
     truststore.inject_into_ssl()
 except ImportError:
