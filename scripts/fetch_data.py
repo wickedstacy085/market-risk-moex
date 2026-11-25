@@ -1,4 +1,4 @@
-"""Обновляет data/imoex.csv (MOEX ISS) и data/ruonia.csv (ЦБ РФ). Нужен только для обновления данных."""
+
 import io
 import json
 import urllib.request
